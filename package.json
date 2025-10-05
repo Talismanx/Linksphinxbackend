@@ -1,0 +1,15 @@
+{
+  "name": "linksphinx-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=18.17" },
+  "dependencies": {
+    "micro": "^9.4.1",
+    "stripe": "^16.8.0"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
