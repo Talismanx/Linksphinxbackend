@@ -1,55 +1,98 @@
 // /api/stripe-webhook.js
-export const config = { api: { bodyParser: false } };
+const Stripe = require('stripe');
+const { Resend } = require('resend');
+const { createClient } = require('@supabase/supabase-js');
+const { v4: uuidv4 } = require('uuid');
 
-import { buffer } from "micro";
-import Stripe from "stripe";
-import { makeLicense } from "../lib/license.js";
-import { sendLicenseEmail } from "../lib/email.js";
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
+const resend = new Resend(process.env.RESEND_API_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
-
-  const sig = req.headers["stripe-signature"];
-  const rawBody = await buffer(req);
+module.exports = async (req, res) => {
+  // IMPORTANT: Vercel needs the raw body for signature verification
+  const sig = req.headers['stripe-signature'];
   let event;
 
   try {
+    const rawBody = await getRawBody(req);
     event = stripe.webhooks.constructEvent(rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error('Webhook signature verification failed.', err.message);
+    res.status(400).send(`Webhook Error: ${err.message}`);
+    return;
   }
 
-  if (event.type === "checkout.session.completed") {
-    try {
-      const session = event.data.object;
-      // Retrieve expanded data (line_items, created timestamp, etc)
-      const full = await stripe.checkout.sessions.retrieve(session.id, { expand: ["line_items"] });
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const email = session?.customer_details?.email || session?.customer_email;
+    if (email) {
+      try {
+        // idempotent insert by session id
+        const { data: existing } = await supabase
+          .from('licenses')
+          .select('license_key')
+          .eq('stripe_session_id', session.id)
+          .maybeSingle();
 
-      const priceId = full?.line_items?.data?.[0]?.price?.id || "";
-      const paymentLinkId = full?.payment_link || "";
-      const email = full?.customer_details?.email || full?.customer_email;
+        let licenseKey = existing?.license_key;
+        if (!licenseKey) {
+          licenseKey = uuidv4();
+          const { error: insertErr } = await supabase
+            .from('licenses')
+            .insert({
+              email,
+              license_key: licenseKey,
+              stripe_session_id: session.id
+            });
+          if (insertErr) {
+            // race: read back
+            const { data: again } = await supabase
+              .from('licenses')
+              .select('license_key')
+              .eq('stripe_session_id', session.id)
+              .maybeSingle();
+            licenseKey = again?.license_key || licenseKey;
+          }
+        }
 
-      // Optional hardening
-      const allowPlink = process.env.ALLOWED_PAYMENT_LINK_ID;
-      const allowPrice = process.env.ALLOWED_PRICE_ID;
-      if (allowPlink && paymentLinkId !== allowPlink) return res.status(200).end("Ignored: plink mismatch");
-      if (allowPrice && priceId !== allowPrice) return res.status(200).end("Ignored: price mismatch");
-
-      // Deterministic iat so it equals the success page license
-      const issuedAtMs = (full.created || Math.floor(Date.now()/1000)) * 1000;
-      const license = makeLicense({ email, paymentLinkId, priceId, issuedAtMs });
-
-      // Email via Resend
-      await sendLicenseEmail({ to: email, license });
-
-      return res.status(200).end("ok");
-    } catch (e) {
-      console.error("webhook error:", e);
-      return res.status(500).end("Internal error");
+        // Email (best effort)
+        try {
+          await resend.emails.send({
+            from: process.env.LICENSE_FROM_EMAIL,
+            to: email,
+            subject: 'Your LinkSphinx Pro License',
+            html: `
+              <div style="font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif">
+                <h2>Thanks for your purchase!</h2>
+                <p>Your license key:</p>
+                <pre style="padding:12px;background:#f5f5f5;border-radius:8px;font-size:16px">${licenseKey}</pre>
+                <p>In the extension’s Options page, paste this key into the License field and press <b>Redeem</b>.</p>
+              </div>
+            `
+          });
+        } catch (_) { /* ignore */ }
+      } catch (e) {
+        console.error('Webhook handler error', e);
+      }
     }
   }
 
-  return res.status(200).end("ignored");
+  res.json({ received: true });
+};
+
+// ——— helpers ———
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
+
+// Vercel config to keep raw body
+module.exports.config = {
+  api: {
+    bodyParser: false,
+  },
+};
