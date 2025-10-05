@@ -74,3 +74,49 @@ export default async function handler(req, res) {
     res.status(500).send("Error rendering success page.");
   }
 }
+// (inside /api/success.js handler, after you computed `license` and `email`)
+res.setHeader("Content-Type", "text/html; charset=utf-8");
+res.status(200).send(`
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font:16px system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#0b1220; color:#e8eef9; display:grid; place-items:center; min-height:100vh; margin:0; }
+    main { width:min(780px,92%); background:#121a2b; border:1px solid #24324a; border-radius:14px; padding:22px; box-shadow:0 10px 40px rgba(0,0,0,.4) }
+    h1 { margin:0 0 6px; font-size:22px }
+    .muted{ color:#9bb0d0 }
+    pre { background:#0d1423; color:#5de35d; padding:14px; border-radius:10px; overflow:auto }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center }
+    button, a.btn { padding:10px 14px; border-radius:10px; border:1px solid #2c3f63; background:#172643; color:#e8eef9; cursor:pointer; text-decoration:none }
+  </style>
+  <main>
+    <h1>Thanks for supporting LinkSphinx 🎉</h1>
+    <p class="muted">Here’s your Pro license key. Paste it on the Options page → Import → “Redeem”.</p>
+    <pre id="key">${license}</pre>
+    <div class="row">
+      <button onclick="navigator.clipboard.writeText(document.getElementById('key').innerText)">Copy license</button>
+      <a class="btn" href="https://linksphinx.vercel.app" target="_blank" rel="noopener">Open LinkSphinx</a>
+      <button id="emailBtn">Email this to me</button>
+    </div>
+    <p class="muted" style="margin-top:10px">Purchased for: <span id="emailText">${email || "—"}</span></p>
+  </main>
+  <script>
+    const btn = document.getElementById('emailBtn');
+    btn?.addEventListener('click', async () => {
+      const lic = document.getElementById('key').innerText.trim();
+      const to = document.getElementById('emailText').innerText.trim();
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      try{
+        const r = await fetch('/api/resend-license', {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ license: lic, to })
+        });
+        const j = await r.json();
+        btn.textContent = j?.ok ? 'Sent!' : 'Failed to send';
+      }catch{
+        btn.textContent = 'Failed to send';
+      }
+      setTimeout(()=>{ btn.disabled=false; btn.textContent='Email this to me'; }, 4000);
+    });
+  </script>
+`);
